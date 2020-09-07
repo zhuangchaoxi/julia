@@ -516,6 +516,9 @@ end
     @test e isa MethodError
     s = sprint(showerror, e)
     m = match(r"at (.*?):[0-9]*", s)
+    @show s
+    @show m.captures[1]
+    @show expanduser(m.captures[1])
     @test isfile(expanduser(m.captures[1]))
 
     g() = x
