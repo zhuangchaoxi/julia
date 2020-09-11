@@ -702,12 +702,16 @@ void CloneCtx::fix_gv_uses()
     auto single_pass = [&] (Function *orig_f) {
         bool changed = false;
         for (auto uses = ConstantUses<GlobalValue>(orig_f, M); !uses.done(); uses.next()) {
-            changed = true;
             auto &stack = uses.get_stack();
             auto info = uses.get_info();
             // We only support absolute pointer relocation.
             assert(info.samebits);
             // And only for non-constant global variable initializers
+            if (isa<GlobalAlias>(info.val)) {
+                // ... but don't crash on global aliases, since we'll retain the original f
+                // (these are emitted for C-callable functions)
+                continue;
+            }
             auto val = cast<GlobalVariable>(info.val);
             assert(info.use->getOperandNo() == 0);
             assert(!val->isConstant());
@@ -717,6 +721,7 @@ void CloneCtx::fix_gv_uses()
                 addr = ConstantExpr::getAdd(addr, ConstantInt::get(T_size, info.offset));
             gv_relocs.emplace_back(addr, fid);
             val->setInitializer(rewrite_gv_init(stack));
+            changed = true;
         }
         return changed;
     };
