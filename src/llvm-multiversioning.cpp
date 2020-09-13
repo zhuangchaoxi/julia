@@ -272,6 +272,7 @@ private:
     Constant *get_ptrdiff32(Constant *ptr, Constant *base) const;
     template<typename T>
     Constant *emit_offset_table(const std::vector<T*> &vars, StringRef name) const;
+    std::pair<Function *, GlobalVariable *> rewrite_alias(GlobalAlias *alias);
 
     LLVMContext &ctx;
     Type *T_size;
@@ -697,6 +698,42 @@ Constant *CloneCtx::rewrite_gv_init(const Stack& stack)
     return res;
 }
 
+// replace an alias to a function with a trampoline and (uninitialized) global variable slot
+std::pair<Function *, GlobalVariable *> CloneCtx::rewrite_alias(GlobalAlias *alias)
+{
+    Function *F = cast<Function>(alias->getAliasee());
+
+    auto Name = alias->getName();
+    alias->setName("");
+    Function *trampoline =
+        Function::Create(F->getFunctionType(), alias->getLinkage(), Name, &M);
+    trampoline->copyAttributesFrom(F);
+    alias->eraseFromParent();
+    GlobalVariable *slot =
+        new GlobalVariable(M, F->getType(), false, GlobalVariable::InternalLinkage, NULL,
+                           Name + ".reloc_slot");
+
+    auto BB = BasicBlock::Create(ctx, "top", trampoline);
+    IRBuilder<> irbuilder(BB);
+
+    auto ptr = irbuilder.CreateLoad(F->getType(), slot);
+    ptr->setMetadata(llvm::LLVMContext::MD_tbaa, tbaa_const);
+    ptr->setMetadata(llvm::LLVMContext::MD_invariant_load, MDNode::get(ctx, None));
+
+    std::vector<Value *> Args;
+    for (auto &arg : trampoline->args())
+        Args.push_back(&arg);
+    auto call = irbuilder.CreateCall(ptr, makeArrayRef(Args));
+    call->setTailCallKind(CallInst::TCK_MustTail);
+
+    if (F->getReturnType() == T_void)
+        irbuilder.CreateRetVoid();
+    else
+        irbuilder.CreateRet(call);
+
+    return std::make_pair(trampoline, slot);
+}
+
 void CloneCtx::fix_gv_uses()
 {
     auto single_pass = [&] (Function *orig_f) {
@@ -706,13 +743,14 @@ void CloneCtx::fix_gv_uses()
             auto info = uses.get_info();
             // We only support absolute pointer relocation.
             assert(info.samebits);
-            // And only for non-constant global variable initializers
-            if (isa<GlobalAlias>(info.val)) {
-                // ... but don't crash on global aliases, since we'll retain the original f
-                // (these are emitted for C-callable functions)
-                continue;
+            GlobalVariable *val;
+            if (auto alias = dyn_cast<GlobalAlias>(info.val)) {
+                Function *trampoline;
+                std::tie(trampoline, val) = rewrite_alias(alias);
             }
-            auto val = cast<GlobalVariable>(info.val);
+            else {
+                val = cast<GlobalVariable>(info.val);
+            }
             assert(info.use->getOperandNo() == 0);
             assert(!val->isConstant());
             auto fid = get_func_id(orig_f);
