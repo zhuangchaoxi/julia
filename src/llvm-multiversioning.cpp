@@ -279,7 +279,6 @@ private:
     Type *T_int32;
     Type *T_void;
     PointerType *T_psize;
-    PointerType *T_pvoidfunc;
     MDNode *tbaa_const;
     MultiVersioning *pass;
     std::vector<jl_target_spec_t> specs;
@@ -343,7 +342,6 @@ CloneCtx::CloneCtx(MultiVersioning *pass, Module &M)
       T_int32(Type::getInt32Ty(ctx)),
       T_void(Type::getVoidTy(ctx)),
       T_psize(PointerType::get(T_size, 0)),
-      T_pvoidfunc(FunctionType::get(T_void, false)->getPointerTo()),
       tbaa_const(tbaa_make_child("jtbaa_const", nullptr, true).first),
       pass(pass),
       specs(jl_get_llvm_clone_targets()),
@@ -709,9 +707,10 @@ std::pair<Function *, GlobalVariable *> CloneCtx::rewrite_alias(GlobalAlias *ali
         Function::Create(F->getFunctionType(), alias->getLinkage(), Name, &M);
     trampoline->copyAttributesFrom(F);
     alias->eraseFromParent();
-    GlobalVariable *slot =
-        new GlobalVariable(M, F->getType(), false, GlobalVariable::InternalLinkage, NULL,
-                           Name + ".reloc_slot");
+
+    uint32_t id;
+    GlobalVariable *slot;
+    std::tie(id, slot) = get_reloc_slot(F);
 
     auto BB = BasicBlock::Create(ctx, "top", trampoline);
     IRBuilder<> irbuilder(BB);
@@ -777,8 +776,8 @@ std::pair<uint32_t,GlobalVariable*> CloneCtx::get_reloc_slot(Function *F)
     auto id = get_func_id(F);
     auto &slot = const_relocs[id];
     if (!slot)
-        slot = new GlobalVariable(M, T_pvoidfunc, false, GlobalVariable::InternalLinkage,
-                                  ConstantPointerNull::get(T_pvoidfunc),
+        slot = new GlobalVariable(M, F->getType(), false, GlobalVariable::InternalLinkage,
+                                  ConstantPointerNull::get(F->getType()),
                                   F->getName() + ".reloc_slot");
     return std::make_pair(id, slot);
 }
@@ -858,10 +857,9 @@ void CloneCtx::fix_inst_uses()
                     uint32_t id;
                     GlobalVariable *slot;
                     std::tie(id, slot) = get_reloc_slot(orig_f);
-                    Instruction *ptr = new LoadInst(T_pvoidfunc, slot, "", false, insert_before);
+                    Instruction *ptr = new LoadInst(orig_f->getType(), slot, "", false, insert_before);
                     ptr->setMetadata(llvm::LLVMContext::MD_tbaa, tbaa_const);
                     ptr->setMetadata(llvm::LLVMContext::MD_invariant_load, MDNode::get(ctx, None));
-                    ptr = new BitCastInst(ptr, F->getType(), "", insert_before);
                     use_i->setOperand(info.use->getOperandNo(),
                                       rewrite_inst_use(uses.get_stack(), ptr,
                                                        insert_before));
