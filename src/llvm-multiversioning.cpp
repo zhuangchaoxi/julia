@@ -700,6 +700,7 @@ Constant *CloneCtx::rewrite_gv_init(const Stack& stack)
 std::pair<Function *, GlobalVariable *> CloneCtx::rewrite_alias(GlobalAlias *alias)
 {
     Function *F = cast<Function>(alias->getAliasee());
+    assert(!is_vector(F->getFunctionType()));
 
     auto Name = alias->getName();
     alias->setName("");
