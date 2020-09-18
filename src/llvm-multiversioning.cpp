@@ -711,6 +711,12 @@ void CloneCtx::rewrite_alias(GlobalAlias *alias, Function *F)
     uint32_t id;
     GlobalVariable *slot;
     std::tie(id, slot) = get_reloc_slot(F);
+    for (auto &grp: groups) {
+        grp.relocs.insert(id);
+        for (auto &tgt: grp.clones) {
+            tgt.relocs.insert(id);
+        }
+    }
 
     auto BB = BasicBlock::Create(ctx, "top", trampoline);
     IRBuilder<> irbuilder(BB);
