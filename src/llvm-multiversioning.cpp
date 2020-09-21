@@ -295,6 +295,8 @@ private:
     std::vector<std::pair<Constant*,uint32_t>> gv_relocs{};
     // Mapping from function id (i.e. 0-based index in `fvars`) to GVs to be initialized.
     std::map<uint32_t,GlobalVariable*> const_relocs;
+    // Functions that were referred to by a global alias, and might not have other uses.
+    std::set<uint32_t> alias_relocs;
     bool has_veccall{false};
     bool has_cloneall{false};
 };
@@ -717,6 +719,7 @@ void CloneCtx::rewrite_alias(GlobalAlias *alias, Function *F)
             tgt.relocs.insert(id);
         }
     }
+    alias_relocs.insert(id);
 
     auto BB = BasicBlock::Create(ctx, "top", trampoline);
     IRBuilder<> irbuilder(BB);
@@ -1006,6 +1009,9 @@ void CloneCtx::emit_metadata()
             if (it != const_relocs.end()) {
                 values.push_back(id_v);
                 values.push_back(get_ptrdiff32(it->second, gbase));
+            }
+            if (alias_relocs.find(id) != alias_relocs.end()) {
+                shared_relocs.insert(id);
             }
         }
         values[0] = ConstantInt::get(T_int32, values.size() / 2);
