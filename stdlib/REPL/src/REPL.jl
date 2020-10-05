@@ -434,6 +434,17 @@ active_module(repl::LineEditREPL) = repl.mistate.active_module
 active_module(::AbstractREPL) = Main
 active_module(d::REPLDisplay) = active_module(d.repl)
 
+"""
+    activate(mod::Module=Main)
+
+Set `mod` as the default contextual module in the REPL,
+both for evaluating expressions and printing them.
+"""
+function activate(mod::Module=Main)
+    Base.active_repl.mistate.active_module = mod
+    nothing
+end
+
 mutable struct REPLCompletionProvider <: CompletionProvider end
 mutable struct ShellCompletionProvider <: CompletionProvider end
 struct LatexCompletions <: CompletionProvider end
