@@ -433,8 +433,7 @@ function is_exported_from_stdlib(name::Symbol, mod::Module)
     orig = getfield(mod, name)
     while !(mod === Base || mod === Core)
         parent = parentmodule(mod)
-        activemod = get_active_module()
-        if mod === activemod || mod === parent || parent === activemod
+        if mod === Main || mod === parent || parent === Main
             return false
         end
         mod = parent
@@ -442,9 +441,9 @@ function is_exported_from_stdlib(name::Symbol, mod::Module)
     return isexported(mod, name) && isdefined(mod, name) && !isdeprecated(mod, name) && getfield(mod, name) === orig
 end
 
-get_active_module() = isdefined(Base, :active_repl) && isdefined(Base.active_repl, :mistate) ?
-    Base.active_repl.mistate.active_module :
-    Main
+active_module() = isdefined(Base, :active_repl) && isdefined(Base.active_repl, :mistate) ?
+                      Base.active_repl.mistate.active_module :
+                      Main
 
 function show_function(io::IO, f::Function, compact::Bool)
     ft = typeof(f)
@@ -456,8 +455,7 @@ function show_function(io::IO, f::Function, compact::Bool)
         print(io, mt.name)
     elseif isdefined(mt, :module) && isdefined(mt.module, mt.name) &&
         getfield(mt.module, mt.name) === f
-        mod = get_active_module()
-        if is_exported_from_stdlib(mt.name, mt.module) || mt.module === mod
+        if is_exported_from_stdlib(mt.name, mt.module) || mt.module === active_module()
             print(io, mt.name)
         else
             print(io, mt.module, ".", mt.name)
@@ -604,7 +602,7 @@ function show_typealias(io::IO, name::GlobalRef, x::Type, env::SimpleVector)
         # Print module prefix unless alias is visible from module passed to
         # IOContext. If :module is not set, default to Main (or current active module).
         # nothing can be used to force printing prefix.
-        from = get(io, :module, get_active_module())
+        from = get(io, :module, active_module())
         if (from === nothing || !isvisible(name.name, name.mod, from))
             show(io, name.mod)
             print(io, ".")
@@ -834,7 +832,7 @@ function show_type_name(io::IO, tn::Core.TypeName)
         # Print module prefix unless type is visible from module passed to
         # IOContext If :module is not set, default to Main (or current active module).
         # nothing can be used to force printing prefix
-        from = get(io, :module, get_active_module())
+        from = get(io, :module, active_module())
         if isdefined(tn, :module) && (from === nothing || !isvisible(sym, tn.module, from))
             show(io, tn.module)
             print(io, ".")
@@ -2423,7 +2421,7 @@ MyStruct
 """
 function dump(arg; maxdepth=DUMP_DEFAULT_MAXDEPTH)
     # this is typically used interactively, so default to being in Main (or current active module)
-    mod = get(stdout, :module, get_active_module())
+    mod = get(stdout, :module, active_module())
     dump(IOContext(stdout::IO, :limit => true, :module => mod), arg; maxdepth=maxdepth)
 end
 
