@@ -95,7 +95,7 @@ end
 @enum WorkerState W_CREATED W_CONNECTED W_TERMINATING W_TERMINATED
 mutable struct Worker
     id::Int
-    msg_lock::Threads.ReentrantLock # Lock for del_msgs, add_msgs, and gcflag
+    msg_lock::Threads.SpinLock # Lock for del_msgs, add_msgs, and gcflag, SpinLock since it needs to be used from finalizers
     del_msgs::Array{Any,1}
     add_msgs::Array{Any,1}
     gcflag::Bool
@@ -134,7 +134,7 @@ mutable struct Worker
         if haskey(map_pid_wrkr, id)
             return map_pid_wrkr[id]
         end
-        w=new(id, Threads.ReentrantLock(), [], [], false, W_CREATED, Threads.Condition(), time(), conn_func)
+        w=new(id, Threads.SpinLock(), [], [], false, W_CREATED, Threads.Condition(), time(), conn_func)
         w.initialized = Event()
         register_worker(w)
         w

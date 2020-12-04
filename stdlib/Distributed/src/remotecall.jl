@@ -266,14 +266,13 @@ function send_del_client(rr)
     elseif id_in_procs(rr.where) # process only if a valid worker
         w = worker_from_id(rr.where)
         msg = (remoteref_id(rr), myid())
-        Threads.@spawn begin # Need to spawn task since we can be in finalizer
-            lock(w.msg_lock) do
-              push!(w.del_msgs, $msg)
-              w.gcflag = true
-            end
-            lock(any_gc_flag) do
-                notify(any_gc_flag)
-            end
+        # Lock is SpinLock an can thus be acquired from finalizer
+        lock(w.msg_lock) do
+          push!(w.del_msgs, msg)
+          w.gcflag = true
+        end
+        lock(any_gc_flag) do
+            notify(any_gc_flag)
         end
     end
 end
