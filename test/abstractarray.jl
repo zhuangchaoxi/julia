@@ -1263,3 +1263,7 @@ Base.pushfirst!(tpa::TestPushArray{T}, a::T) where T = pushfirst!(tpa.data, a)
     pushfirst!(tpa, 6, 5, 4, 3, 2)
     @test tpa.data == reverse(collect(1:6))
 end
+
+
+@test haskey([1, 2, 3], 1)
+@test !haskey([1, 2, 3], 4)
