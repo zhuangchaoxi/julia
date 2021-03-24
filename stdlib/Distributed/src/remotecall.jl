@@ -247,13 +247,18 @@ function del_clients(pairs::Vector)
     end
 end
 
+# The task below is coalescing the `flush_gc_msgs` call
+# across multiple producers, see `send_del_client`,
+# and `send_add_client`.
+# XXX: Is this worth the additional complexity?
+#      `flush_gc_msgs` has to iterate over all connected workers.
 const any_gc_flag = Threads.Condition()
 function start_gc_msgs_task()
-    @async begin
+    Threads.@spawn begin
         while true
             lock(any_gc_flag) do
                 wait(any_gc_flag)
-                flush_gc_msgs()
+                flush_gc_msgs() # handle's throws internally
             end
         end
     end
@@ -266,13 +271,15 @@ function send_del_client(rr)
     elseif id_in_procs(rr.where) # process only if a valid worker
         w = worker_from_id(rr.where)
         msg = (remoteref_id(rr), myid())
-        # Lock is SpinLock an can thus be acquired from finalizer
-        lock(w.msg_lock) do
-          push!(w.del_msgs, msg)
-          w.gcflag = true
-        end
-        lock(any_gc_flag) do
-            notify(any_gc_flag)
+        # We cannot acquire locks from finalizers
+        @async begin
+            lock(w.msg_lock) do
+              push!(w.del_msgs, msg)
+              w.gcflag = true
+            end
+            lock(any_gc_flag) do
+                notify(any_gc_flag)
+            end
         end
     end
 end
