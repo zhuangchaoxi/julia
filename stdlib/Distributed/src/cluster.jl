@@ -92,7 +92,7 @@ mutable struct WorkerConfig
     end
 end
 
-@enum WorkerState W_CREATED W_CONNECTED W_TERMINATING W_TERMINATED
+@enum WorkerState W_CREATED W_CONNECTED W_TIMEDOUT W_TERMINATING W_TERMINATED
 mutable struct Worker
     id::Int
     msg_lock::Threads.ReentrantLock # Lock for del_msgs, add_msgs, and gcflag
@@ -189,19 +189,23 @@ end
 
 function wait_for_conn(w)
     if w.state === W_CREATED
-        timeout =  worker_timeout() - (time() - w.ct_time)
+        timeout = worker_timeout() - (time() - w.ct_time)
         timeout <= 0 && error("peer $(w.id) has not connected to $(myid())")
 
         @async begin
             sleep(timeout)
             lock(w.c_state) do
-                # Note: This could wakeup other listeners on `c_state`
+                if w.state === W_CREATED
+                    w.state = W_TIMEDOUT
+                end
                 notify(w.c_state; all=true)
             end
         end
         lock(w.c_state) do
-            wait(w.c_state)
-            w.state === W_CREATED && error("peer $(w.id) didn't connect to $(myid()) within $timeout seconds")
+            while w.state === W_CREATED
+                wait(w.c_state)
+                w.state === W_TIMEDOUT && error("peer $(w.id) didn't connect to $(myid()) within $timeout seconds")
+            end
         end
     end
     nothing
@@ -646,13 +650,14 @@ function create_worker(manager, wconfig)
         for jw in PGRP.workers
             if (jw.id != 1) && (jw.id < w.id)
                 # wait for wl to join
-                if jw.state === W_CREATED
-                    lock(jw.c_state) do
-                       wait(jw.c_state)
+                lock(jw.c_state) do
+                    while jw.state === W_CREATED
+                        wait(jw.c_state)
                     end
-                    # Note: jw.state could still be in W_CREATED if we got woke to early,
+                    if jw.state === W_CONNECTED
+                        push!(join_list, jw)
+                    end
                 end
-                push!(join_list, jw)
             end
         end
 
@@ -674,14 +679,14 @@ function create_worker(manager, wconfig)
         end
 
         for wl in wlist
-            if wl.state === W_CREATED
-                # wait for wl to join
-                lock(wl.c_state) do
+            lock(wl.c_state) do
+                while wl.state === W_CREATED
                    wait(wl.c_state)
                 end
-                # Note: wl.state could still be in W_CREATED if we got woke to early,
+                if wl.state === W_CONNECTED
+                    push!(join_list, wl)
+                end
             end
-            push!(join_list, wl)
         end
     end
 
