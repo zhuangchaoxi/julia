@@ -274,8 +274,8 @@ function send_del_client(rr)
         # We cannot acquire locks from finalizers
         @async begin
             lock(w.msg_lock) do
-              push!(w.del_msgs, msg)
-              w.gcflag = true
+                push!(w.del_msgs, msg)
+                w.gcflag = true
             end
             lock(any_gc_flag) do
                 notify(any_gc_flag)
