@@ -163,10 +163,10 @@ function check_worker_state(w::Worker)
         else
             w.ct_time = time()
             if myid() > w.id
-                @async exec_conn_func(w)
+                Threads.@spawn exec_conn_func(w)
             else
                 # route request via node 1
-                @async remotecall_fetch((p,to_id) -> remotecall_fetch(exec_conn_func, p, to_id), 1, w.id, myid())
+                Threads.@spawn remotecall_fetch((p,to_id) -> remotecall_fetch(exec_conn_func, p, to_id), 1, w.id, myid())
             end
             wait_for_conn(w)
         end
@@ -257,7 +257,7 @@ function start_worker(out::IO, cookie::AbstractString=readline(stdin); close_std
     else
         sock = listen(interface, LPROC.bind_port)
     end
-    @async while isopen(sock)
+    Threads.@spawn while isopen(sock)
         client = accept(sock)
         process_messages(client, client, true)
     end
@@ -289,7 +289,7 @@ end
 
 
 function redirect_worker_output(ident, stream)
-    @async while !eof(stream)
+    Threads.@spawn while !eof(stream)
         line = readline(stream)
         if startswith(line, "      From worker ")
             # stdout's of "additional" workers started from an initial worker on a host are not available
@@ -494,7 +494,7 @@ function addprocs_locked(manager::ClusterManager; kwargs...)
 
     @sync begin
         while true
-            if isempty(launched)
+            if isempty(launched) # XXX: Turn this into a Channel
                 istaskdone(t_launch) && break
                 @async (sleep(1); notify(launch_ntfy))
                 wait(launch_ntfy)
@@ -503,7 +503,7 @@ function addprocs_locked(manager::ClusterManager; kwargs...)
             if !isempty(launched)
                 wconfig = popfirst!(launched)
                 let wconfig=wconfig
-                    @async setup_launched_worker(manager, wconfig, launched_q)
+                    Threads.@spawn setup_launched_worker(manager, wconfig, launched_q)
                 end
             end
         end
@@ -582,7 +582,7 @@ function launch_n_additional_processes(manager, frompid, fromconfig, cnt, launch
             wconfig.port = port
 
             let wconfig=wconfig
-                @async begin
+                Threads.@spawn begin
                     pid = create_worker(manager, wconfig)
                     remote_do(redirect_output_from_additional_worker, frompid, pid, port)
                     push!(launched_q, pid)
@@ -1236,7 +1236,7 @@ function interrupt(pids::AbstractVector=workers())
     @assert myid() == 1
     @sync begin
         for pid in pids
-            @async interrupt(pid)
+            Threads.@spawn interrupt(pid)
         end
     end
 end
