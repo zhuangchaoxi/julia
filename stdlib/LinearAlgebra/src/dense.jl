@@ -75,7 +75,8 @@ isposdef!(A::AbstractMatrix) =
 
 Test whether a matrix is positive definite (and Hermitian) by trying to perform a
 Cholesky factorization of `A`.
-See also [`isposdef!`](@ref)
+
+See also [`isposdef!`](@ref), [`cholesky`](@ref).
 
 # Examples
 ```jldoctest
@@ -205,6 +206,8 @@ diagind(m::Integer, n::Integer, k::Integer=0) =
 
 An `AbstractRange` giving the indices of the `k`th diagonal of the matrix `M`.
 
+See also: [`diag`](@ref), [`diagm`](@ref), [`Diagonal`](@ref).
+
 # Examples
 ```jldoctest
 julia> A = [1 2 3; 4 5 6; 7 8 9]
@@ -227,7 +230,7 @@ end
 
 The `k`th diagonal of a matrix, as a vector.
 
-See also: [`diagm`](@ref)
+See also: [`diagm`](@ref), [`diagind`](@ref), [`Diagonal`](@ref), [`isdiag`](@ref).
 
 # Examples
 ```jldoctest
@@ -556,6 +559,26 @@ julia> exp(A)
 """
 exp(A::StridedMatrix{<:BlasFloat}) = exp!(copy(A))
 exp(A::StridedMatrix{<:Union{Integer,Complex{<:Integer}}}) = exp!(float.(A))
+
+"""
+    cis(A::AbstractMatrix)
+
+Compute ``\\exp(i A)`` for a square matrix ``A``.
+
+!!! compat "Julia 1.7"
+    Support for using `cis` with matrices was added in Julia 1.7.
+
+# Examples
+```jldoctest
+julia> cis([π 0; 0 π]) ≈ -I
+true
+```
+"""
+Base.cis(A::AbstractMatrix) = exp(im * A)  # fallback
+Base.cis(A::AbstractMatrix{<:Base.HWNumber}) = exp_maybe_inplace(float.(im .* A))
+
+exp_maybe_inplace(A::StridedMatrix{<:Union{ComplexF32, ComplexF64}}) = exp!(A)
+exp_maybe_inplace(A) = exp(A)
 
 """
     ^(b::Number, A::AbstractMatrix)

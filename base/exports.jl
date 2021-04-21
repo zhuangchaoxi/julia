@@ -71,6 +71,7 @@ export
     Rational,
     Regex,
     RegexMatch,
+    Returns,
     RoundFromZero,
     RoundDown,
     RoundingMode,
@@ -171,6 +172,10 @@ export
     ≢,
     xor,
     ⊻,
+    nand,
+    nor,
+    ⊼,
+    ⊽,
     %,
     ÷,
     &,
@@ -685,6 +690,7 @@ export
     timedwait,
     asyncmap,
     asyncmap!,
+    errormonitor,
 
 # channels
     take!,
@@ -915,7 +921,7 @@ export
     uperm,
     walkdir,
 
-# external processes ## TODO: whittle down these exports.
+# external processes
     detach,
     getpid,
     ignorestatus,

@@ -608,7 +608,10 @@ static const auto jlegal_func = new JuliaFunction{
     [](LLVMContext &C) {
         Type *T = PointerType::get(T_jlvalue, AddressSpace::CalleeRooted);
         return FunctionType::get(T_int32, {T, T}, false); },
-    nullptr,
+    [](LLVMContext &C) { return AttributeList::get(C,
+            Attributes(C, {Attribute::ReadOnly, Attribute::NoUnwind, Attribute::ArgMemOnly}),
+            AttributeSet(),
+            None); },
 };
 static const auto jl_alloc_obj_func = new JuliaFunction{
     "julia.gc_alloc_obj",
@@ -1504,11 +1507,13 @@ static jl_cgval_t convert_julia_type_union(jl_codectx_t &ctx, const jl_cgval_t &
             // actually need it.
             Value *union_box_dt = NULL;
             BasicBlock *union_isaBB = NULL;
+            BasicBlock *post_union_isaBB = NULL;
             auto maybe_setup_union_isa = [&]() {
                 if (!union_isaBB) {
                     union_isaBB = BasicBlock::Create(jl_LLVMContext, "union_isa", ctx.f);
                     ctx.builder.SetInsertPoint(union_isaBB);
-                    union_box_dt = emit_typeof(ctx, v.Vboxed);
+                    union_box_dt = emit_typeof_or_null(ctx, v.Vboxed);
+                    post_union_isaBB = ctx.builder.GetInsertBlock();
                 }
             };
 
@@ -1540,7 +1545,7 @@ static jl_cgval_t convert_julia_type_union(jl_codectx_t &ctx, const jl_cgval_t &
                 ctx.builder.SetInsertPoint(postBB);
                 PHINode *tindex_phi = ctx.builder.CreatePHI(T_int8, 2);
                 tindex_phi->addIncoming(new_tindex, currBB);
-                tindex_phi->addIncoming(union_box_tindex, union_isaBB);
+                tindex_phi->addIncoming(union_box_tindex, post_union_isaBB);
                 new_tindex = tindex_phi;
             }
         }
@@ -1718,6 +1723,14 @@ static void jl_init_function(Function *F)
 #else
     F->addFnAttr("no-frame-pointer-elim", "true");
 #endif
+#endif
+#if JL_LLVM_VERSION >= 110000 && !defined(JL_ASAN_ENABLED) && !defined(_OS_WINDOWS_)
+    // ASAN won't like us accessing undefined memory causing spurious issues,
+    // and Windows has platform-specific handling which causes it to mishandle
+    // this annotation. Other platforms should just ignore this if they don't
+    // implement it.
+    F->addFnAttr("probe-stack", "inline-asm");
+    //F->addFnAttr("stack-probe-size", 4096); // can use this to change the default
 #endif
 }
 
@@ -6297,20 +6310,7 @@ static std::pair<std::unique_ptr<Module>, jl_llvm_functions_t>
         }
     }
 
-    /*
-    // step 6. (optional) check for stack overflow (the slower way)
-    Value *cur_sp =
-        ctx.builder.CreateCall(Intrinsic::getDeclaration(M,
-                                                     Intrinsic::frameaddress),
-                           ConstantInt::get(T_int32, 0));
-    Value *sp_ok =
-        ctx.builder.CreateICmpUGT(cur_sp,
-                              ConstantInt::get(T_size,
-                                               (uptrint_t)jl_stack_lo));
-    error_unless(ctx, sp_ok, "stack overflow");
-    */
-
-    // step 7. set up GC frame
+    // step 6. set up GC frame
     allocate_gc_frame(ctx, b0);
     Value *last_age = NULL;
     emit_last_age_field(ctx);
@@ -6318,7 +6318,7 @@ static std::pair<std::unique_ptr<Module>, jl_llvm_functions_t>
         last_age = tbaa_decorate(tbaa_gcframe, ctx.builder.CreateAlignedLoad(ctx.world_age_field, Align(sizeof(size_t))));
     }
 
-    // step 8. allocate local variables slots
+    // step 7. allocate local variables slots
     // must be in the first basic block for the llvm mem2reg pass to work
     auto allocate_local = [&](jl_varinfo_t &varinfo, jl_sym_t *s) {
         jl_value_t *jt = varinfo.value.typ;
@@ -6436,7 +6436,7 @@ static std::pair<std::unique_ptr<Module>, jl_llvm_functions_t>
         }
     }
 
-    // step 9. move args into local variables
+    // step 8. move args into local variables
     Function::arg_iterator AI = f->arg_begin();
 
     auto get_specsig_arg = [&](jl_value_t *argType, Type *llvmArgType, bool isboxed) {
@@ -6566,7 +6566,7 @@ static std::pair<std::unique_ptr<Module>, jl_llvm_functions_t>
         }
     }
 
-    // step 10. allocate rest argument
+    // step 9. allocate rest argument
     CallInst *restTuple = NULL;
     if (va && ctx.vaSlot != -1) {
         jl_varinfo_t &vi = ctx.slots[ctx.vaSlot];
@@ -6608,7 +6608,7 @@ static std::pair<std::unique_ptr<Module>, jl_llvm_functions_t>
         }
     }
 
-    // step 11. Compute properties for each statements
+    // step 10. Compute properties for each statements
     //     This needs to be computed by iterating in the IR order
     //     instead of control flow order.
     auto in_user_mod = [] (jl_module_t *mod) {
@@ -6730,7 +6730,7 @@ static std::pair<std::unique_ptr<Module>, jl_llvm_functions_t>
     Instruction &prologue_end = ctx.builder.GetInsertBlock()->back();
 
 
-    // step 12. Do codegen in control flow order
+    // step 11. Do codegen in control flow order
     std::vector<int> workstack;
     std::map<int, BasicBlock*> BB;
     std::map<size_t, BasicBlock*> come_from_bb;
@@ -7288,7 +7288,7 @@ static std::pair<std::unique_ptr<Module>, jl_llvm_functions_t>
         PN->eraseFromParent();
     }
 
-    // step 13. Perform any delayed instantiations
+    // step 12. Perform any delayed instantiations
     if (ctx.debug_enabled) {
         bool in_prologue = true;
         for (auto &BB : *ctx.f) {
