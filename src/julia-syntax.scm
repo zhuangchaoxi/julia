@@ -283,18 +283,39 @@
 
 ;; select the `then` or `else` part of `if @generated` based on flag `genpart`
 (define (generated-part- x genpart)
-  (cond ((or (atom? x) (quoted? x) (function-def? x)) x)
+  (cond ((or (atom? x) (quoted? x) (function-def? x))
+         (list x '()))
         ((if-generated? x)
-         (if genpart `($ ,(caddr x)) (cadddr x)))
-        (else (cons (car x)
-                    (map (lambda (e) (generated-part- e genpart)) (cdr x))))))
+         (if genpart
+           (let ((tmp (gensy)))
+             ;(set! init (cons `(= ,tmp ,(caddr x)) init))
+             (list `($ ,tmp) `((= ,tmp ,(caddr x)))))
+           (list (cadddr x) '())))
+        (else
+          (let ((init '()))
+            (list
+              (cons (car x)
+                    (map (lambda (e)
+                           (let ((y (generated-part- e genpart)))
+                             (set! init (foldl cons init (cadr y)))
+                             (car y)))
+                         (cdr x)))
+              init)))))
 
 (define (generated-version body)
-  `(block
-    ,(julia-bq-macro (generated-part- body #t))))
+  (let* ((x (generated-part- body #t))
+         (expr (car x))
+         (init (cadr x)))
+    `(block
+      ,@init
+      ,@(if (length= init 1)
+            `((if (call (core isa) ,(cadar init) (core CodeInfo))
+                  (return ,(caddar init))))
+            '())
+      ,(julia-bq-macro expr))))
 
 (define (non-generated-version body)
-  (generated-part- body #f))
+  (car (generated-part- body #f)))
 
 ;; Remove and return the line number for the start of the function definition
 (define (maybe-remove-functionloc! body)
