@@ -46,7 +46,11 @@ export
     global_logger,
     disable_logging,
     SimpleLogger,
-    ConsoleLogger
+    ConsoleLogger,
+    Debug,
+    Info,
+    Warn,
+    Error
 
 include("ConsoleLogger.jl")
 
