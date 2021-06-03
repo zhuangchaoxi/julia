@@ -911,7 +911,7 @@ end
 
 @testset "rand! for BigInt/BigFloat" begin
     rng = MersenneTwister()
-    s = Random.SamplerBigInt(1:big(9))
+    s = Random.SamplerBigInt(MersenneTwister, 1:big(9))
     x = rand(s)
     @test x isa BigInt
     y = rand!(rng, x, s)
