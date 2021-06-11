@@ -1480,11 +1480,11 @@ static jl_cgval_t typed_load(jl_codectx_t &ctx, Value *ptr, Value *idx_0based, j
 }
 
 static jl_cgval_t typed_store(jl_codectx_t &ctx,
-        Value *ptr, Value *idx_0based, const jl_cgval_t &rhs,
+        Value *ptr, Value *idx_0based, const jl_cgval_t &rhs, const jl_cgval_t &cmp,
         jl_value_t *jltype, MDNode *tbaa, MDNode *aliasscope,
         Value *parent,  // for the write barrier, NULL if no barrier needed
-        bool isboxed, AtomicOrdering Order, unsigned alignment,
-        bool needlock, bool issetfield, bool maybe_null_if_boxed)
+        bool isboxed, AtomicOrdering Order, AtomicOrdering FailOrder, unsigned alignment,
+        bool needlock, bool issetfield, bool isreplacefield, bool maybe_null_if_boxed)
 {
     assert(!needlock || parent != nullptr);
     jl_cgval_t oldval = rhs;
@@ -1513,9 +1513,11 @@ static jl_cgval_t typed_store(jl_codectx_t &ctx,
         alignment = sizeof(void*);
     else if (!alignment)
         alignment = julia_alignment(jltype);
+    Instruction *instr = nullptr;
+    //Value *Compare = nullptr;
+    Value *Success = nullptr;
     if (needlock)
         emit_lockstate_value(ctx, parent, true);
-    Instruction *instr = nullptr;
     if (issetfield || Order == AtomicOrdering::NotAtomic) {
         if (!issetfield) {
             instr = ctx.builder.CreateAlignedLoad(elty, ptr, Align(alignment));
@@ -1524,46 +1526,116 @@ static jl_cgval_t typed_store(jl_codectx_t &ctx,
             if (tbaa)
                 tbaa_decorate(tbaa, instr);
         }
+        BasicBlock *DoneBB;
+        if (isreplacefield) {
+            BasicBlock *BB = BasicBlock::Create(jl_LLVMContext, "xchg", ctx.f);
+            DoneBB = BasicBlock::Create(jl_LLVMContext, "done_xchg", ctx.f);
+            oldval = mark_julia_type(ctx, instr, isboxed, jltype);
+            Success = emit_f_is(ctx, oldval, cmp); // TODO: make sure the is non-allocating!
+            ctx.builder.CreateCondBr(Success, BB, DoneBB);
+            ctx.builder.SetInsertPoint(BB);
+        }
         StoreInst *store = ctx.builder.CreateAlignedStore(r, ptr, Align(alignment));
         store->setOrdering(Order);
         if (aliasscope)
             store->setMetadata("noalias", aliasscope);
         if (tbaa)
             tbaa_decorate(tbaa, store);
+        if (isreplacefield) {
+            ctx.builder.CreateBr(DoneBB);
+            ctx.builder.SetInsertPoint(DoneBB);
+        }
     }
-    else if (isboxed) {
-        // workaround for really bad LLVM design issue: Xchg only works with integers
-        LoadInst *Current = ctx.builder.CreateAlignedLoad(elty, ptr, Align(alignment));
-        if (aliasscope)
-            Current->setMetadata("noalias", aliasscope);
-        if (tbaa)
-            tbaa_decorate(tbaa, Current);
-        BasicBlock *From = ctx.builder.GetInsertBlock();
-        BasicBlock *BB = BasicBlock::Create(jl_LLVMContext, "try_xchg", ctx.f);
-        ctx.builder.CreateBr(BB);
-        ctx.builder.SetInsertPoint(BB);
-        PHINode *Cmp = ctx.builder.CreatePHI(r->getType(), 2);
-        Cmp->addIncoming(Current, From);
+    else if (isboxed || isreplacefield) {
+        // we have to handle isboxed here as a workaround for really bad LLVM design issue: plain Xchg only works with integers
+        bool needloop;
+        BasicBlock *BB, *DoneBB;
+        if (isreplacefield) {
+            if (!isboxed) {
+                needloop = false; // XXX sometimes need it
+                Value *SameType = emit_isa(ctx, cmp, jltype, nullptr).first;
+                if (!isa<ConstantInt>(SameType) || !SameType->isTrue()) {
+                    needloop = true;
+                    ctx.builder.CreateCondBr(SameType, BB, SkipBB);
+                    ctx.builder.SetInsertPoint(SkipBB);
+                    instr = ctx.builder.CreateAlignedLoad(elty, ptr, Align(alignment));
+                    if (aliasscope)
+                        Current->setMetadata("noalias", aliasscope);
+                    if (tbaa)
+                        tbaa_decorate(tbaa, Current);
+                    ctx.builder.CreateBr(DoneBB);
+                    ctx.builder.SetInsertPoint(DoneBB);
+                    PHINode *Succ = ctx.builder.CreatePHI(Success->getType(), 2);
+                    Succ->addIncoming(ConstantInt::get(T_int1, 0), SkipBB);
+                    Succ->addIncoming(Success, BB);
+                    Success = Succ;
+                    ctx.builder.SetInsertPoint(BB);
+                }
+                Compare = emit_unbox(ctx, elty, cmp, jltype);
+            }
+            else if (cmp.isboxed) {
+                Compare = boxed(ctx, cmp);
+                needloop = false; // XXX sometimes need it
+            }
+            else {
+                Compare = V_rnull;
+                needloop = true;
+            }
+        }
+        else {
+            LoadInst *Current = ctx.builder.CreateAlignedLoad(elty, ptr, Align(alignment));
+            if (aliasscope)
+                Current->setMetadata("noalias", aliasscope);
+            if (tbaa)
+                tbaa_decorate(tbaa, Current);
+            Compare = Current;
+            needloop = true;
+        }
+        if (needloop) {
+            BasicBlock *From = ctx.builder.GetInsertBlock();
+            BB = BasicBlock::Create(jl_LLVMContext, "xchg", ctx.f);
+            DoneBB = BasicBlock::Create(jl_LLVMContext, "done_xchg", ctx.f);
+            ctx.builder.CreateBr(BB);
+            ctx.builder.SetInsertPoint(BB);
+            PHINode *Cmp = ctx.builder.CreatePHI(r->getType(), 2);
+            Cmp->addIncoming(Compare, From);
+            Compare = Cmp;
+        }
         if (Order == AtomicOrdering::Unordered)
             Order = AtomicOrdering::Monotonic;
 #if JL_LLVM_VERSION >= 130000
-        auto *store = ctx.builder.CreateAtomicCmpXchg(ptr, Cmp, r, Align(alignment), Order, AtomicOrdering::Monotonic);
+        auto *store = ctx.builder.CreateAtomicCmpXchg(ptr, Compare, r, Align(alignment), Order, AtomicOrdering::Monotonic);
 #else
-        auto *store = ctx.builder.CreateAtomicCmpXchg(ptr, Cmp, r, Order, AtomicOrdering::Monotonic);
+        auto *store = ctx.builder.CreateAtomicCmpXchg(ptr, Compare, r, Order, AtomicOrdering::Monotonic);
         store->setAlignment(Align(alignment));
 #endif
         if (aliasscope)
             store->setMetadata("noalias", aliasscope);
         if (tbaa)
             tbaa_decorate(tbaa, store);
-        ctx.builder.Insert(instr = ExtractValueInst::Create(store, 0));
-        Value *Success = ctx.builder.CreateExtractValue(store, 1);
-        From = BB;
-        Cmp->addIncoming(instr, From);
-        BB = BasicBlock::Create(jl_LLVMContext, "done_xchg", ctx.f);
-        ctx.builder.CreateCondBr(Success, BB, From);
-        ctx.builder.SetInsertPoint(BB);
-    } else {
+        instr = ctx.builder.Insert(ExtractValueInst::Create(store, 0));
+        Success = ctx.builder.CreateExtractValue(store, 1);
+        if (needloop) {
+            Value *Done = Success;
+            if (isreplacefield) {
+                // XXX need nullcheck guard and success check and type-check
+                if (intcast) {
+                    ctx.builder.CreateStore(instr, ctx.builder.CreateBitCast(intcast, instr->getType()->getPointerTo()));
+                    oldval = mark_julia_slot(intcast, jltype, NULL, tbaa_stack);
+                }
+                else {
+                    oldval = mark_julia_type(ctx, instr, isboxed, jltype);
+                }
+                Done = ConstantInt::get(T_int1, 1);
+                //if (isboxed /* TODO: && !mutabl */ || ((jl_datatype_t*)jltype)->layout->haspadding)
+                //    Done = ctx.builder.CreateNot(emit_f_is(ctx, oldval, cmp)); // TODO: make sure the is non-allocating!
+            }
+            cast<PHINode>(Compare)->addIncoming(instr, ctx.builder.GetInsertBlock());
+            ctx.builder.CreateCondBr(Done, DoneBB, BB);
+            ctx.builder.SetInsertPoint(DoneBB);
+        }
+    }
+    else {
 #if JL_LLVM_VERSION >= 130000
         instr = ctx.builder.CreateAtomicRMW(AtomicRMWInst::Xchg, ptr, r, Align(alignment), Order);
 #else
@@ -1579,10 +1651,21 @@ static jl_cgval_t typed_store(jl_codectx_t &ctx,
     if (needlock)
         emit_lockstate_value(ctx, parent, false);
     if (parent != NULL) {
+        BasicBlock *DoneBB;
+        if (isreplacefield) {
+            BasicBlock *BB = BasicBlock::Create(jl_LLVMContext, "xchg_wb", ctx.f);
+            DoneBB = BasicBlock::Create(jl_LLVMContext, "done_xchg_wb", ctx.f);
+            ctx.builder.CreateCondBr(Success, BB, DoneBB);
+            ctx.builder.SetInsertPoint(BB);
+        }
         if (!isboxed)
             emit_write_multibarrier(ctx, parent, r, rhs.typ);
         else if (!type_is_permalloc(rhs.typ))
             emit_write_barrier(ctx, parent, r);
+        if (isreplacefield) {
+            ctx.builder.CreateBr(DoneBB);
+            ctx.builder.SetInsertPoint(DoneBB);
+        }
     }
     if (!issetfield) {
         if (intcast) {
@@ -1595,6 +1678,12 @@ static jl_cgval_t typed_store(jl_codectx_t &ctx,
                 null_pointer_check(ctx, first_ptr, nullptr);
         }
         oldval = mark_julia_type(ctx, instr, isboxed, jltype);
+        if (isreplacefield) {
+            // TODO: do better here
+            jl_cgval_t argv[2] = {oldval, mark_julia_type(ctx, Success, false, jl_bool_type)};
+            instr = emit_jlcall(ctx, jltuple_func, V_rnull, argv, 2, JLCALL_F_CC);
+            oldval = mark_julia_type(ctx, instr, true, jl_any_type);
+        }
     }
     return oldval;
 }
@@ -2970,8 +3059,9 @@ static void emit_write_multibarrier(jl_codectx_t &ctx, Value *parent, Value *agg
 
 static jl_cgval_t emit_setfield(jl_codectx_t &ctx,
         jl_datatype_t *sty, const jl_cgval_t &strct, size_t idx0,
-        const jl_cgval_t &rhs, bool checked, bool wb, AtomicOrdering Order,
-        bool needlock, bool issetfield)
+        const jl_cgval_t &rhs, const jl_cgval_t &cmp,
+        bool checked, bool wb, AtomicOrdering Order, AtomicOrdering FailOrder,
+        bool needlock, bool issetfield, bool isreplacefield)
 {
     if (!sty->name->mutabl && checked) {
         std::string msg = "setfield!: immutable struct of type "
@@ -3006,10 +3096,23 @@ static jl_cgval_t emit_setfield(jl_codectx_t &ctx,
         jl_cgval_t oldval = rhs;
         if (!issetfield)
             oldval = emit_unionload(ctx, addr, ptindex, jfty, fsz, al, strct.tbaa, true);
+        Value *Success;
+        BasicBlock *DoneBB;
+        if (isreplacefield) {
+            BasicBlock *BB = BasicBlock::Create(jl_LLVMContext, "xchg", ctx.f);
+            DoneBB = BasicBlock::Create(jl_LLVMContext, "done_xchg", ctx.f);
+            Success = emit_f_is(ctx, oldval, cmp); // TODO: make sure the is non-allocating!
+            ctx.builder.CreateCondBr(Success, BB, DoneBB);
+            ctx.builder.SetInsertPoint(BB);
+        }
         tbaa_decorate(tbaa_unionselbyte, ctx.builder.CreateAlignedStore(tindex, ptindex, Align(1)));
         // copy data
         if (!rhs.isghost) {
             emit_unionmove(ctx, addr, strct.tbaa, rhs, nullptr);
+        }
+        if (isreplacefield) {
+            ctx.builder.CreateBr(DoneBB);
+            ctx.builder.SetInsertPoint(DoneBB);
         }
         if (needlock)
             emit_lockstate_value(ctx, strct, false);
@@ -3020,9 +3123,10 @@ static jl_cgval_t emit_setfield(jl_codectx_t &ctx,
         bool isboxed = jl_field_isptr(sty, idx0);
         size_t nfields = jl_datatype_nfields(sty);
         bool maybe_null = idx0 >= nfields - (unsigned)sty->name->n_uninitialized;
-        return typed_store(ctx, addr, NULL, rhs, jfty, strct.tbaa, nullptr,
+        return typed_store(ctx, addr, NULL, rhs, cmp, jfty, strct.tbaa, nullptr,
             wb ? maybe_bitcast(ctx, data_pointer(ctx, strct), T_pjlvalue) : nullptr,
-            isboxed, Order, align, needlock, issetfield, maybe_null);
+            isboxed, Order, FailOrder, align,
+            needlock, issetfield, isreplacefield, maybe_null);
     }
 }
 
@@ -3201,7 +3305,7 @@ static jl_cgval_t emit_new_struct(jl_codectx_t &ctx, jl_value_t *ty, size_t narg
             else
                 need_wb = false;
             emit_typecheck(ctx, rhs, jl_svecref(sty->types, i), "new");
-            emit_setfield(ctx, sty, strctinfo, i, rhs, false, need_wb, AtomicOrdering::NotAtomic, false, true);
+            emit_setfield(ctx, sty, strctinfo, i, rhs, jl_cgval_t(), false, need_wb, AtomicOrdering::NotAtomic, AtomicOrdering::NotAtomic, false, true, false);
         }
         return strctinfo;
     }
