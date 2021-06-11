@@ -690,7 +690,7 @@ static jl_cgval_t emit_pointerset(jl_codectx_t &ctx, jl_cgval_t *argv)
         assert(!isboxed);
         if (!type_is_ghost(ptrty)) {
             thePtr = emit_unbox(ctx, ptrty->getPointerTo(), e, e.typ);
-            typed_store(ctx, thePtr, im1, x, ety, tbaa_data, nullptr, nullptr, isboxed, AtomicOrdering::NotAtomic, align_nb);
+            typed_store(ctx, thePtr, im1, x, ety, tbaa_data, nullptr, nullptr, isboxed, AtomicOrdering::NotAtomic, align_nb, false, true, false);
         }
     }
     return e;

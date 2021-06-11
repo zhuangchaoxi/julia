@@ -879,6 +879,8 @@ static const std::map<jl_fptr_args_t, JuliaFunction*> builtin_func_map = {
     { &jl_f_isdefined,          new JuliaFunction{"jl_f_isdefined", get_func_sig, get_func_attrs} },
     { &jl_f_getfield,           new JuliaFunction{"jl_f_getfield", get_func_sig, get_func_attrs} },
     { &jl_f_setfield,           new JuliaFunction{"jl_f_setfield", get_func_sig, get_func_attrs} },
+    { &jl_f_swapfield,          new JuliaFunction{"jl_f_swapfield", get_func_sig, get_func_attrs} },
+    { &jl_f_modifyfield,        new JuliaFunction{"jl_f_modifyfield", get_func_sig, get_func_attrs} },
     { &jl_f_fieldtype,          new JuliaFunction{"jl_f_fieldtype", get_func_sig, get_func_attrs} },
     { &jl_f_nfields,            new JuliaFunction{"jl_f_nfields", get_func_sig, get_func_attrs} },
     { &jl_f__expr,              new JuliaFunction{"jl_f__expr", get_func_sig, get_func_attrs} },
@@ -2989,7 +2991,10 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                                         data_owner,
                                         isboxed,
                                         isboxed ? AtomicOrdering::Unordered : AtomicOrdering::NotAtomic, // TODO: we should do this for anything with CountTrackedPointers(elty).count > 0
-                                        0);
+                                        0,
+                                        false,
+                                        true,
+                                        false);
                         }
                     }
                     *ret = ary;
@@ -3130,17 +3135,19 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
         return false;
     }
 
-    else if (f == jl_builtin_setfield && (nargs == 3 || nargs == 4)) {
+    else if ((f == jl_builtin_setfield || f == jl_builtin_swapfield) &&
+             (nargs == 3 || nargs == 4)) {
         const jl_cgval_t &obj = argv[1];
         const jl_cgval_t &fld = argv[2];
         const jl_cgval_t &val = argv[3];
         enum jl_memory_order order = jl_memory_order_notatomic;
+        bool issetfield = f == jl_builtin_setfield;
         if (nargs == 4) {
             const jl_cgval_t &ord = argv[4];
-            emit_typecheck(ctx, ord, (jl_value_t*)jl_symbol_type, "setfield!");
+            emit_typecheck(ctx, ord, (jl_value_t*)jl_symbol_type, issetfield ? "setfield!" : "swapfield!");
             if (!ord.constant)
                 return false;
-            order = jl_get_atomic_order((jl_sym_t*)ord.constant, false, true);
+            order = jl_get_atomic_order((jl_sym_t*)ord.constant, !issetfield, true);
         }
         if (order == jl_memory_order_invalid) {
             emit_atomic_error(ctx, "invalid atomic ordering");
@@ -3161,27 +3168,26 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
             }
             if (idx != -1) {
                 jl_value_t *ft = jl_svecref(uty->types, idx);
-                if (jl_subtype(val.typ, ft)) {
+                if (!jl_has_free_typevars(ft) && jl_subtype(val.typ, ft)) {
                     // TODO: attempt better codegen for approximate types
                     bool isboxed = jl_field_isptr(uty, idx);
                     bool isatomic = jl_field_isatomic(uty, idx);
                     bool needlock = isatomic && !isboxed && jl_datatype_size(jl_field_type(uty, idx)) > MAX_ATOMIC_SIZE;
                     if (isatomic == (order == jl_memory_order_notatomic)) {
                         emit_atomic_error(ctx,
-                                isatomic ? "setfield!: atomic field cannot be written non-atomically"
-                                         : "setfield!: non-atomic field cannot be written atomically");
+                                issetfield ?
+                                (isatomic ? "setfield!: atomic field cannot be written non-atomically"
+                                          : "setfield!: non-atomic field cannot be written atomically") :
+                                (isatomic ? "swapfield!: atomic field cannot be written non-atomically"
+                                          : "swapfield!: non-atomic field cannot be written atomically"));
                         *ret = jl_cgval_t();
                         return true;
                     }
-                    if (needlock)
-                        emit_lockstate_value(ctx, obj, true);
-                    emit_setfield(ctx, uty, obj, idx, val, true, true,
+                    *ret = emit_setfield(ctx, uty, obj, idx, val, true, true,
                             (needlock || order <= jl_memory_order_notatomic)
                             ? (isboxed ? AtomicOrdering::Unordered : AtomicOrdering::NotAtomic) // TODO: we should do this for anything with CountTrackedPointers(elty).count > 0
-                            : get_llvm_atomic_order(order));
-                    if (needlock)
-                        emit_lockstate_value(ctx, obj, false);
-                    *ret = val;
+                            : get_llvm_atomic_order(order),
+                            needlock, issetfield);
                     return true;
                 }
             }
