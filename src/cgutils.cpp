@@ -1514,8 +1514,9 @@ static jl_cgval_t typed_store(jl_codectx_t &ctx,
     else if (!alignment)
         alignment = julia_alignment(jltype);
     Instruction *instr = nullptr;
-    //Value *Compare = nullptr;
+    Value *Compare = nullptr;
     Value *Success = nullptr;
+    BasicBlock *DoneBB = issetfield || (!isreplacefield && !isboxed) ? nullptr : BasicBlock::Create(jl_LLVMContext, "done_xchg", ctx.f);
     if (needlock)
         emit_lockstate_value(ctx, parent, true);
     if (issetfield || Order == AtomicOrdering::NotAtomic) {
@@ -1526,12 +1527,10 @@ static jl_cgval_t typed_store(jl_codectx_t &ctx,
             if (tbaa)
                 tbaa_decorate(tbaa, instr);
         }
-        BasicBlock *DoneBB;
         if (isreplacefield) {
-            BasicBlock *BB = BasicBlock::Create(jl_LLVMContext, "xchg", ctx.f);
-            DoneBB = BasicBlock::Create(jl_LLVMContext, "done_xchg", ctx.f);
             oldval = mark_julia_type(ctx, instr, isboxed, jltype);
             Success = emit_f_is(ctx, oldval, cmp); // TODO: make sure the is non-allocating!
+            BasicBlock *BB = BasicBlock::Create(jl_LLVMContext, "xchg", ctx.f);
             ctx.builder.CreateCondBr(Success, BB, DoneBB);
             ctx.builder.SetInsertPoint(BB);
         }
@@ -1541,41 +1540,43 @@ static jl_cgval_t typed_store(jl_codectx_t &ctx,
             store->setMetadata("noalias", aliasscope);
         if (tbaa)
             tbaa_decorate(tbaa, store);
-        if (isreplacefield) {
+        if (DoneBB)
             ctx.builder.CreateBr(DoneBB);
-            ctx.builder.SetInsertPoint(DoneBB);
-        }
     }
     else if (isboxed || isreplacefield) {
         // we have to handle isboxed here as a workaround for really bad LLVM design issue: plain Xchg only works with integers
         bool needloop;
-        BasicBlock *BB, *DoneBB;
+        PHINode *Succ = nullptr, *Current = nullptr;
         if (isreplacefield) {
             if (!isboxed) {
                 needloop = false; // XXX sometimes need it
+                //if (((jl_datatype_t*)jltype)->layout->haspadding)
                 Value *SameType = emit_isa(ctx, cmp, jltype, nullptr).first;
-                if (!isa<ConstantInt>(SameType) || !SameType->isTrue()) {
-                    needloop = true;
+                if (SameType != ConstantInt::getTrue(jl_LLVMContext)) {
+                    BasicBlock *SkipBB = BasicBlock::Create(jl_LLVMContext, "skip_xchg", ctx.f);
+                    BasicBlock *BB = BasicBlock::Create(jl_LLVMContext, "xchg", ctx.f);
                     ctx.builder.CreateCondBr(SameType, BB, SkipBB);
                     ctx.builder.SetInsertPoint(SkipBB);
                     instr = ctx.builder.CreateAlignedLoad(elty, ptr, Align(alignment));
+                    // TODO: this has fail ordering
                     if (aliasscope)
-                        Current->setMetadata("noalias", aliasscope);
+                        instr->setMetadata("noalias", aliasscope);
                     if (tbaa)
-                        tbaa_decorate(tbaa, Current);
+                        tbaa_decorate(tbaa, instr);
                     ctx.builder.CreateBr(DoneBB);
                     ctx.builder.SetInsertPoint(DoneBB);
-                    PHINode *Succ = ctx.builder.CreatePHI(Success->getType(), 2);
+                    Succ = ctx.builder.CreatePHI(T_int1, 2);
                     Succ->addIncoming(ConstantInt::get(T_int1, 0), SkipBB);
-                    Succ->addIncoming(Success, BB);
-                    Success = Succ;
+                    Current = ctx.builder.CreatePHI(instr->getType(), 2);
+                    Current->addIncoming(instr, SkipBB);
                     ctx.builder.SetInsertPoint(BB);
                 }
                 Compare = emit_unbox(ctx, elty, cmp, jltype);
             }
             else if (cmp.isboxed) {
                 Compare = boxed(ctx, cmp);
-                needloop = false; // XXX sometimes need it
+                needloop = true; // XXX sometimes don't need it
+                //if (/* TODO: && !mutabl */ || ((jl_datatype_t*)jltype)->layout->haspadding)
             }
             else {
                 Compare = V_rnull;
@@ -1591,16 +1592,17 @@ static jl_cgval_t typed_store(jl_codectx_t &ctx,
             Compare = Current;
             needloop = true;
         }
+        BasicBlock *BB;
         if (needloop) {
             BasicBlock *From = ctx.builder.GetInsertBlock();
             BB = BasicBlock::Create(jl_LLVMContext, "xchg", ctx.f);
-            DoneBB = BasicBlock::Create(jl_LLVMContext, "done_xchg", ctx.f);
             ctx.builder.CreateBr(BB);
             ctx.builder.SetInsertPoint(BB);
             PHINode *Cmp = ctx.builder.CreatePHI(r->getType(), 2);
             Cmp->addIncoming(Compare, From);
             Compare = Cmp;
         }
+        // TODO: specify the actual orderings
         if (Order == AtomicOrdering::Unordered)
             Order = AtomicOrdering::Monotonic;
 #if JL_LLVM_VERSION >= 130000
@@ -1615,8 +1617,8 @@ static jl_cgval_t typed_store(jl_codectx_t &ctx,
             tbaa_decorate(tbaa, store);
         instr = ctx.builder.Insert(ExtractValueInst::Create(store, 0));
         Success = ctx.builder.CreateExtractValue(store, 1);
+        Value *Done = Success;
         if (needloop) {
-            Value *Done = Success;
             if (isreplacefield) {
                 // XXX need nullcheck guard and success check and type-check
                 if (intcast) {
@@ -1626,14 +1628,21 @@ static jl_cgval_t typed_store(jl_codectx_t &ctx,
                 else {
                     oldval = mark_julia_type(ctx, instr, isboxed, jltype);
                 }
-                Done = ConstantInt::get(T_int1, 1);
-                //if (isboxed /* TODO: && !mutabl */ || ((jl_datatype_t*)jltype)->layout->haspadding)
-                //    Done = ctx.builder.CreateNot(emit_f_is(ctx, oldval, cmp)); // TODO: make sure the is non-allocating!
+                // TODO: use emit_guarded here
+                Done = ctx.builder.CreateOr(Success, ctx.builder.CreateNot(emit_f_is(ctx, oldval, cmp))); // TODO: make sure the is non-allocating!
             }
             cast<PHINode>(Compare)->addIncoming(instr, ctx.builder.GetInsertBlock());
-            ctx.builder.CreateCondBr(Done, DoneBB, BB);
-            ctx.builder.SetInsertPoint(DoneBB);
         }
+        if (Succ != nullptr) {
+            Current->addIncoming(instr, ctx.builder.GetInsertBlock());
+            instr = Current;
+            Succ->addIncoming(Success, ctx.builder.GetInsertBlock());
+            Success = Succ;
+        }
+        if (needloop)
+            ctx.builder.CreateCondBr(Done, DoneBB, BB);
+        else
+            ctx.builder.CreateBr(DoneBB);
     }
     else {
 #if JL_LLVM_VERSION >= 130000
@@ -1647,12 +1656,16 @@ static jl_cgval_t typed_store(jl_codectx_t &ctx,
             instr->setMetadata("noalias", aliasscope);
         if (tbaa)
             tbaa_decorate(tbaa, instr);
+        assert(DoneBB == nullptr);
     }
+    if (DoneBB)
+        ctx.builder.SetInsertPoint(DoneBB);
     if (needlock)
         emit_lockstate_value(ctx, parent, false);
     if (parent != NULL) {
         BasicBlock *DoneBB;
         if (isreplacefield) {
+            // TOOD: avoid this branch if we aren't making a write barrier
             BasicBlock *BB = BasicBlock::Create(jl_LLVMContext, "xchg_wb", ctx.f);
             DoneBB = BasicBlock::Create(jl_LLVMContext, "done_xchg_wb", ctx.f);
             ctx.builder.CreateCondBr(Success, BB, DoneBB);
