@@ -99,7 +99,7 @@ function setstate!(x::TaskLocalRNG, s0::UInt64, s1::UInt64, s2::UInt64, s3::UInt
     x
 end
 
-@inline function rand(::TaskLocalRNG, ::SamplerType{UInt64})
+@inline function rand(::Union{TaskLocalRNG, _GLOBAL_RNG}, ::SamplerType{UInt64})
     task = current_task()
     s0, s1, s2, s3 = task.rngState0, task.rngState1, task.rngState2, task.rngState3
     tmp = s0 + s3
@@ -177,15 +177,17 @@ function seed!(rng::Union{TaskLocalRNG, Xoshiro}, seed::AbstractVector{UInt32})
     end
 end
 
-@inline function rand(rng::Union{TaskLocalRNG, Xoshiro}, ::SamplerType{UInt128})
+const XoshiroLike = Union{TaskLocalRNG,Xoshiro,_GLOBAL_RNG}
+
+@inline function rand(rng::XoshiroLike, ::SamplerType{UInt128})
     first = rand(rng, UInt64)
-    second = rand(rng,UInt64)
+    second = rand(rng, UInt64)
     second + UInt128(first)<<64
 end
 
-@inline rand(rng::Union{TaskLocalRNG, Xoshiro}, ::SamplerType{Int128}) = rand(rng, UInt128) % Int128
+@inline rand(rng::XoshiroLike, ::SamplerType{Int128}) = rand(rng, UInt128) % Int128
 
-@inline function rand(rng::Union{TaskLocalRNG, Xoshiro},
+@inline function rand(rng::XoshiroLike,
                       T::SamplerUnion(Bool, Int8, UInt8, Int16, UInt16, Int32, UInt32, Int64))
     S = T[]
     # use upper bits
@@ -218,15 +220,15 @@ end
 
 # for partial words, use upper bits from Xoshiro
 
-rand(r::Union{TaskLocalRNG, Xoshiro}, ::SamplerTrivial{UInt52Raw{UInt64}}) = rand(r, UInt64) >>> 12
-rand(r::Union{TaskLocalRNG, Xoshiro}, ::SamplerTrivial{UInt52{UInt64}})    = rand(r, UInt64) >>> 12
-rand(r::Union{TaskLocalRNG, Xoshiro}, ::SamplerTrivial{UInt104{UInt128}})  = rand(r, UInt104Raw())
+rand(r::XoshiroLike, ::SamplerTrivial{UInt52Raw{UInt64}}) = rand(r, UInt64) >>> 12
+rand(r::XoshiroLike, ::SamplerTrivial{UInt52{UInt64}})    = rand(r, UInt64) >>> 12
+rand(r::XoshiroLike, ::SamplerTrivial{UInt104{UInt128}})  = rand(r, UInt104Raw())
 
-rand(r::Union{TaskLocalRNG, Xoshiro}, ::SamplerTrivial{CloseOpen01{Float16}}) =
+rand(r::XoshiroLike, ::SamplerTrivial{CloseOpen01{Float16}}) =
     Float16(Float32(rand(r, UInt16) >>> 5) * Float32(0x1.0p-11))
 
-rand(r::Union{TaskLocalRNG, Xoshiro}, ::SamplerTrivial{CloseOpen01{Float32}}) =
+rand(r::XoshiroLike, ::SamplerTrivial{CloseOpen01{Float32}}) =
     Float32(rand(r, UInt32) >>> 8) * Float32(0x1.0p-24)
 
-rand(r::Union{TaskLocalRNG, Xoshiro}, ::SamplerTrivial{CloseOpen01_64}) =
+rand(r::XoshiroLike, ::SamplerTrivial{CloseOpen01_64}) =
     Float64(rand(r, UInt64) >>> 11) * 0x1.0p-53
