@@ -1,0 +1,23 @@
+steps:
+  - label: "coverage-linux64"
+    commands:
+      - echo "--- Print the Git status"
+      - git status
+      - git log -n 1
+      - echo ""
+      - echo "--- Install build dependencies"
+      - apt-get update
+      - apt-get install -y build-essential cmake curl gfortran libatomic1 m4 perl pkg-config python python3 wget
+      - echo "--- Build Julia from source"
+      - make -j 6
+      - ./julia -e 'using InteractiveUtils; InteractiveUtils.versioninfo()'
+      - echo "--- Run tests on Base with code coverage enabled"
+      - ./julia --procs=6 --code-coverage=all .buildkite/coverage-linux64/run_tests_base.jl
+      - echo "--- Run tests on stdlibs with code coverage enabled"
+      - ./julia --procs=6 .buildkite/coverage-linux64/run_tests_stdlib.jl
+      - echo "--- Process and upload coverage information"
+      - ./julia .buildkite/coverage-linux64/upload_coverage.jl
+    agents:
+      queue: "juliacpu" # this should be julia -- also in pipeline settings
+      # os: linux # tag missing for juliacpu queue
+    timeout_in_minutes: 60
